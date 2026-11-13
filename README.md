@@ -1,5 +1,7 @@
 # Экспорт и импорт переписки Claude Code
 
+[![CI](https://github.com/pese-git/claude-code-sync-data/actions/workflows/ci.yml/badge.svg)](https://github.com/pese-git/claude-code-sync-data/actions/workflows/ci.yml)
+
 Два скрипта на Python для работы с историей сессий Claude Code:
 
 - **`export_claude_code.py`** выгружает переписку всех проектов в Markdown (для чтения), JSON (для обработки) и raw (точная копия для переноса).
@@ -85,6 +87,8 @@ uv run ruff check          # линтер
 uv run ruff format         # форматирование
 uv run ty check            # проверка типов
 ```
+
+Те же проверки запускает GitHub Actions ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) на каждый push в `master` и на pull request: линтеры и ty, тесты на Python 3.9–3.14 в Linux и на крайних версиях в macOS и Windows.
 
 Тесты в `tests/` не трогают настоящую `~/.claude/projects`: каждый тест собирает синтетическую историю во временной папке (фикстура `history` в `tests/conftest.py`) и вызывает `main()` скриптов в том же процессе. Кроме отдельных функций, проверяется полный цикл экспорт → импорт: raw-формат восстанавливается байт в байт, из json собирается корректная цепочка сообщений, субагенты попадают на своё место, работают `--remap`, `--new-ids`, `--overwrite` и `--dry-run`.
 
