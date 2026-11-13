@@ -15,13 +15,64 @@
 
 ## Установка
 
-Скрипты можно запускать напрямую (`python3 export_claude_code.py`), а можно поставить как команды:
+Скрипты можно запускать напрямую (`python3 export_claude_code.py`), а можно поставить как команды `claude-code-export` и `claude-code-import`. Опции у команд те же, что у скриптов.
+
+### Через pipx
+
+[pipx](https://pipx.pypa.io/) ставит пакет в отдельное окружение и добавляет его команды в `PATH`.
+
+1. Установите pipx, если его ещё нет:
+
+   ```bash
+   brew install pipx          # macOS
+   sudo apt install pipx      # Debian, Ubuntu
+   python3 -m pip install --user pipx   # остальные системы
+   ```
+
+   Затем добавьте папку с командами pipx в `PATH` и откройте новый терминал:
+
+   ```bash
+   pipx ensurepath
+   ```
+
+2. Установите пакет прямо из GitHub:
+
+   ```bash
+   pipx install git+https://github.com/pese-git/claude-code-sync-data.git
+   ```
+
+   Или из локальной копии репозитория:
+
+   ```bash
+   pipx install /путь/к/claude-code-sync-data
+   ```
+
+3. Проверьте, что команды доступны:
+
+   ```bash
+   claude-code-export --help
+   claude-code-import --help
+   ```
+
+**Обновление.** Номер версии пакета между коммитами не меняется, поэтому `pipx upgrade` сообщит, что всё актуально, и ничего не обновит. Чтобы поставить свежую версию из того же источника, переустановите пакет:
 
 ```bash
-uv tool install .
+pipx reinstall claude-code-sync-data
 ```
 
-После этого доступны `claude-code-export` и `claude-code-import` с теми же опциями. Без установки их можно вызвать из папки проекта через `uv run claude-code-export ...`.
+**Удаление:**
+
+```bash
+pipx uninstall claude-code-sync-data
+```
+
+### Через uv
+
+```bash
+uv tool install git+https://github.com/pese-git/claude-code-sync-data.git
+```
+
+Из папки проекта можно поставить локальную копию через `uv tool install .` или запускать команды без установки: `uv run claude-code-export ...`.
 
 ## Разработка
 
