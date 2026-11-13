@@ -11,6 +11,7 @@ Claude Code хранит сессии в ~/.claude/projects/<закодиров�
     python export_claude_code.py --project myapp --since 2026-10-01
     python export_claude_code.py --tools --thinking          # с вызовами инструментов и размышлениями
     python export_claude_code.py --single-file               # всё в один all_conversations.md
+    python export_claude_code.py --format md raw --sidechain # raw — для import_claude_code.py
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shutil
 import sys
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -363,9 +365,9 @@ def main() -> int:
     ap.add_argument(
         "--format",
         nargs="+",
-        choices=["md", "json"],
+        choices=["md", "json", "raw"],
         default=["md"],
-        help="форматы вывода: md, json (можно оба)",
+        help="форматы вывода: md, json, raw (можно несколько; raw — копия .jsonl для импорта)",
     )
     ap.add_argument(
         "--project",
@@ -469,6 +471,8 @@ def main() -> int:
                 (proj_out / f"{base}.json").write_text(
                     json.dumps(session_to_dict(s), ensure_ascii=False, indent=2), encoding="utf-8"
                 )
+            if "raw" in opts.format:
+                shutil.copy2(s.file, proj_out / f"{base}.jsonl")  # байт в байт
             if opts.single_file:
                 all_md.append(session_to_markdown(s, opts, heading_level=2))
 
@@ -481,6 +485,8 @@ def main() -> int:
                     "ended": s.ended,
                     "messages": len(s.messages),
                     "file": str((proj_out / base).relative_to(out_root)),
+                    # исходное место: по нему импорт узнаёт субагентов (<session>/subagents/…)
+                    "source_rel": s.file.relative_to(src).as_posix(),
                 }
             )
             total += 1
@@ -493,11 +499,14 @@ def main() -> int:
         "",
     ]
     current = None
+    ext = next(
+        e for f, e in (("md", ".md"), ("json", ".json"), ("raw", ".jsonl")) if f in opts.format
+    )
     for it in index:
         if it["project"] != current:
             current = it["project"]
             lines += ["", f"## `{current}`", ""]
-        link = it["file"] + (".md" if "md" in opts.format else ".json")
+        link = it["file"] + ext
         lines.append(
             f"- {fmt_ts(it['started'])} — [{it['title'] or it['session_id'][:8]}]"
             f"({link.replace(' ', '%20')}) ({it['messages']} сообщ.)"

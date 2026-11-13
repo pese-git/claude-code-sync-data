@@ -119,6 +119,11 @@ def load_raw(path: Path, index_by_file: dict[str, dict]) -> ImportItem | None:
         parts = Path(meta["source_rel"]).parts
         if len(parts) >= 4 and parts[-2] == "subagents":
             subagent_of, agent_name = parts[-3], Path(parts[-1]).stem
+    elif not meta:
+        # Без index.json: в записях субагента есть agentId, а sessionId — родительская сессия
+        agent_id = next((e["agentId"] for e in entries if e.get("agentId")), None)
+        if agent_id and sid and all(e.get("isSidechain") for e in entries if "isSidechain" in e):
+            subagent_of, agent_name = sid, f"agent-{agent_id}"
     if not sid:
         sid = path.stem
     return ImportItem(path, "raw", sid, cwd, entries, subagent_of, agent_name, title)
