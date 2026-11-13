@@ -19,10 +19,11 @@ import argparse
 import json
 import re
 import sys
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 DEFAULT_SOURCE = Path.home() / ".claude" / "projects"
 TOOL_RESULT_LIMIT = 4000  # символов результата инструмента в Markdown
@@ -30,11 +31,12 @@ TOOL_RESULT_LIMIT = 4000  # символов результата инструм
 
 # ---------------------------------------------------------------- модель данных
 
+
 @dataclass
 class Message:
-    role: str                 # user | assistant
+    role: str  # user | assistant
     timestamp: str | None
-    blocks: list[dict]        # нормализованные блоки: {"type": ..., ...}
+    blocks: list[dict]  # нормализованные блоки: {"type": ..., ...}
     is_sidechain: bool = False
     model: str | None = None
 
@@ -42,7 +44,7 @@ class Message:
 @dataclass
 class Session:
     session_id: str
-    project_dir: str          # имя папки в ~/.claude/projects
+    project_dir: str  # имя папки в ~/.claude/projects
     project_path: str | None  # реальный путь проекта (cwd)
     file: Path
     title: str | None = None
@@ -59,6 +61,7 @@ class Session:
 
 
 # ---------------------------------------------------------------- парсинг
+
 
 def read_jsonl(path: Path) -> Iterable[dict]:
     with path.open(encoding="utf-8", errors="replace") as f:
@@ -93,12 +96,23 @@ def normalize_content(content: Any) -> list[dict]:
         elif t == "redacted_thinking":
             blocks.append({"type": "thinking", "text": "[скрыто]"})
         elif t == "tool_use":
-            blocks.append({"type": "tool_use", "id": b.get("id"),
-                           "name": b.get("name"), "input": b.get("input", {})})
+            blocks.append(
+                {
+                    "type": "tool_use",
+                    "id": b.get("id"),
+                    "name": b.get("name"),
+                    "input": b.get("input", {}),
+                }
+            )
         elif t == "tool_result":
-            blocks.append({"type": "tool_result", "id": b.get("tool_use_id"),
-                           "is_error": bool(b.get("is_error")),
-                           "text": flatten_tool_result(b.get("content"))})
+            blocks.append(
+                {
+                    "type": "tool_result",
+                    "id": b.get("tool_use_id"),
+                    "is_error": bool(b.get("is_error")),
+                    "text": flatten_tool_result(b.get("content")),
+                }
+            )
         elif t == "image":
             blocks.append({"type": "image"})
         else:
@@ -158,19 +172,25 @@ def parse_session(path: Path, project_dir: str) -> Session:
         if not blocks:
             continue
 
-        s.messages.append(Message(
-            role=msg.get("role") or etype,
-            timestamp=e.get("timestamp"),
-            blocks=blocks,
-            is_sidechain=bool(e.get("isSidechain")),
-            model=msg.get("model"),
-        ))
+        s.messages.append(
+            Message(
+                role=msg.get("role") or etype,
+                timestamp=e.get("timestamp"),
+                blocks=blocks,
+                is_sidechain=bool(e.get("isSidechain")),
+                model=msg.get("model"),
+            )
+        )
 
     # Сообщения ассистента приходят кусками (по блоку на запись) — склеиваем подряд идущие
     merged: list[Message] = []
     for m in s.messages:
-        if merged and m.role == "assistant" and merged[-1].role == "assistant" \
-                and merged[-1].is_sidechain == m.is_sidechain:
+        if (
+            merged
+            and m.role == "assistant"
+            and merged[-1].role == "assistant"
+            and merged[-1].is_sidechain == m.is_sidechain
+        ):
             merged[-1].blocks.extend(m.blocks)
         else:
             merged.append(m)
@@ -188,7 +208,9 @@ def iter_session_files(project: Path) -> Iterable[Path]:
 
 SYSTEM_NOISE = re.compile(
     r"^\s*(<command-name>|<local-command-stdout>|<command-message>|<local-command-caveat>|"
-    r"Caveat: The messages below|\[Request interrupted)", re.S)
+    r"Caveat: The messages below|\[Request interrupted)",
+    re.S,
+)
 
 
 def is_noise(text: str) -> bool:
@@ -200,6 +222,7 @@ def strip_system_reminders(text: str) -> str:
 
 
 # ---------------------------------------------------------------- Markdown
+
 
 def fmt_ts(ts: str | None) -> str:
     if not ts:
@@ -249,22 +272,33 @@ def session_to_markdown(s: Session, opts: argparse.Namespace, heading_level: int
                     continue
                 parts.append(text)
             elif t == "thinking" and opts.thinking and b["text"].strip():
-                parts.append("<details><summary>💭 Размышления</summary>\n\n"
-                             + b["text"].strip() + "\n\n</details>")
+                parts.append(
+                    "<details><summary>💭 Размышления</summary>\n\n"
+                    + b["text"].strip()
+                    + "\n\n</details>"
+                )
             elif t == "tool_use" and opts.tools:
-                parts.append(f"🔧 **{b['name']}**\n\n"
-                             + fence(json.dumps(b["input"], ensure_ascii=False, indent=2), "json"))
+                parts.append(
+                    f"🔧 **{b['name']}**\n\n"
+                    + fence(json.dumps(b["input"], ensure_ascii=False, indent=2), "json")
+                )
             elif t == "tool_result" and opts.tools:
                 label = "❌ Ошибка инструмента" if b["is_error"] else "📤 Результат"
-                parts.append(f"<details><summary>{label}</summary>\n\n"
-                             + fence(truncate(b["text"], opts.max_tool_output))
-                             + "\n\n</details>")
+                parts.append(
+                    f"<details><summary>{label}</summary>\n\n"
+                    + fence(truncate(b["text"], opts.max_tool_output))
+                    + "\n\n</details>"
+                )
             elif t == "image":
                 parts.append("_[изображение]_")
         if not parts:
             continue
         only_results = all(b["type"] == "tool_result" for b in m.blocks)
-        who = "⚙️ Инструмент" if only_results else ("👤 Пользователь" if m.role == "user" else "🤖 Claude")
+        who = (
+            "⚙️ Инструмент"
+            if only_results
+            else ("👤 Пользователь" if m.role == "user" else "🤖 Claude")
+        )
         if m.is_sidechain:
             who += " (субагент)"
         out.append(f"{h}# {who}  ·  {fmt_ts(m.timestamp)}")
@@ -285,14 +319,20 @@ def session_to_dict(s: Session) -> dict:
         "ended": s.ended,
         "source_file": str(s.file),
         "messages": [
-            {"role": m.role, "timestamp": m.timestamp, "model": m.model,
-             "is_sidechain": m.is_sidechain, "content": m.blocks}
+            {
+                "role": m.role,
+                "timestamp": m.timestamp,
+                "model": m.model,
+                "is_sidechain": m.is_sidechain,
+                "content": m.blocks,
+            }
             for m in s.messages
         ],
     }
 
 
 # ---------------------------------------------------------------- main
+
 
 def safe_name(name: str, maxlen: int = 80) -> str:
     name = re.sub(r"[^\w\-.]+", "_", name, flags=re.U).strip("_.")
@@ -306,24 +346,56 @@ def parse_date(s: str) -> datetime:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Экспорт переписки Claude Code по всем проектам")
-    ap.add_argument("-s", "--source", type=Path, default=DEFAULT_SOURCE,
-                    help=f"папка с проектами (по умолчанию {DEFAULT_SOURCE})")
-    ap.add_argument("-o", "--output", type=Path, default=Path("claude_code_export"),
-                    help="куда сохранить (по умолчанию ./claude_code_export)")
-    ap.add_argument("--format", nargs="+", choices=["md", "json"], default=["md"],
-                    help="форматы вывода: md, json (можно оба)")
-    ap.add_argument("--project", action="append", default=[],
-                    help="экспортировать только проекты, путь которых содержит подстроку (можно несколько)")
-    ap.add_argument("--since", type=parse_date, help="только сессии, начатые после даты (YYYY-MM-DD)")
+    ap.add_argument(
+        "-s",
+        "--source",
+        type=Path,
+        default=DEFAULT_SOURCE,
+        help=f"папка с проектами (по умолчанию {DEFAULT_SOURCE})",
+    )
+    ap.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        default=Path("claude_code_export"),
+        help="куда сохранить (по умолчанию ./claude_code_export)",
+    )
+    ap.add_argument(
+        "--format",
+        nargs="+",
+        choices=["md", "json"],
+        default=["md"],
+        help="форматы вывода: md, json (можно оба)",
+    )
+    ap.add_argument(
+        "--project",
+        action="append",
+        default=[],
+        help="экспортировать только проекты, путь которых содержит подстроку (можно несколько)",
+    )
+    ap.add_argument(
+        "--since", type=parse_date, help="только сессии, начатые после даты (YYYY-MM-DD)"
+    )
     ap.add_argument("--until", type=parse_date, help="только сессии, начатые до даты (YYYY-MM-DD)")
-    ap.add_argument("--tools", action="store_true", help="включить вызовы инструментов и их результаты")
+    ap.add_argument(
+        "--tools", action="store_true", help="включить вызовы инструментов и их результаты"
+    )
     ap.add_argument("--thinking", action="store_true", help="включить блоки размышлений")
     ap.add_argument("--sidechain", action="store_true", help="включить сообщения субагентов")
-    ap.add_argument("--raw", action="store_true", help="не фильтровать служебные сообщения (/команды и т.п.)")
-    ap.add_argument("--max-tool-output", type=int, default=TOOL_RESULT_LIMIT,
-                    help="макс. длина результата инструмента в md (0 = без ограничения)")
-    ap.add_argument("--single-file", action="store_true",
-                    help="дополнительно собрать всё в один all_conversations.md")
+    ap.add_argument(
+        "--raw", action="store_true", help="не фильтровать служебные сообщения (/команды и т.п.)"
+    )
+    ap.add_argument(
+        "--max-tool-output",
+        type=int,
+        default=TOOL_RESULT_LIMIT,
+        help="макс. длина результата инструмента в md (0 = без ограничения)",
+    )
+    ap.add_argument(
+        "--single-file",
+        action="store_true",
+        help="дополнительно собрать всё в один all_conversations.md",
+    )
     opts = ap.parse_args()
 
     src: Path = opts.source.expanduser()
@@ -362,8 +434,10 @@ def main() -> int:
 
         if opts.project:
             label = (sessions[0].project_path if sessions else None) or project.name
-            if not any(p.lower() in label.lower() or p.lower() in project.name.lower()
-                       for p in opts.project):
+            if not any(
+                p.lower() in label.lower() or p.lower() in project.name.lower()
+                for p in opts.project
+            ):
                 continue
 
         def in_range(s: Session) -> bool:
@@ -393,30 +467,45 @@ def main() -> int:
                 (proj_out / f"{base}.md").write_text(session_to_markdown(s, opts), encoding="utf-8")
             if "json" in opts.format:
                 (proj_out / f"{base}.json").write_text(
-                    json.dumps(session_to_dict(s), ensure_ascii=False, indent=2), encoding="utf-8")
+                    json.dumps(session_to_dict(s), ensure_ascii=False, indent=2), encoding="utf-8"
+                )
             if opts.single_file:
                 all_md.append(session_to_markdown(s, opts, heading_level=2))
 
-            index.append({
-                "project": proj_label, "session_id": s.session_id, "title": s.title,
-                "started": s.started, "ended": s.ended, "messages": len(s.messages),
-                "file": str((proj_out / base).relative_to(out_root)),
-            })
+            index.append(
+                {
+                    "project": proj_label,
+                    "session_id": s.session_id,
+                    "title": s.title,
+                    "started": s.started,
+                    "ended": s.ended,
+                    "messages": len(s.messages),
+                    "file": str((proj_out / base).relative_to(out_root)),
+                }
+            )
             total += 1
 
     # Оглавление
-    lines = ["# Экспорт Claude Code", "",
-             f"Экспортировано: {datetime.now():%Y-%m-%d %H:%M}, сессий: {total}", ""]
+    lines = [
+        "# Экспорт Claude Code",
+        "",
+        f"Экспортировано: {datetime.now():%Y-%m-%d %H:%M}, сессий: {total}",
+        "",
+    ]
     current = None
     for it in index:
         if it["project"] != current:
             current = it["project"]
             lines += ["", f"## `{current}`", ""]
         link = it["file"] + (".md" if "md" in opts.format else ".json")
-        lines.append(f"- {fmt_ts(it['started'])} — [{it['title'] or it['session_id'][:8]}]"
-                     f"({link.replace(' ', '%20')}) ({it['messages']} сообщ.)")
+        lines.append(
+            f"- {fmt_ts(it['started'])} — [{it['title'] or it['session_id'][:8]}]"
+            f"({link.replace(' ', '%20')}) ({it['messages']} сообщ.)"
+        )
     (out_root / "INDEX.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
-    (out_root / "index.json").write_text(json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8")
+    (out_root / "index.json").write_text(
+        json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
     if opts.single_file:
         (out_root / "all_conversations.md").write_text("\n\n---\n\n".join(all_md), encoding="utf-8")

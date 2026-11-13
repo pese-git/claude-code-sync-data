@@ -20,19 +20,22 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import re
 import shutil
 import sys
 import uuid
+from collections.abc import Iterable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 DEFAULT_TARGET = Path.home() / ".claude" / "projects"
 
 
 # ---------------------------------------------------------------- утилиты
+
 
 def encode_project_dir(path: str) -> str:
     """Так Claude Code называет папку проекта: все символы кроме букв и цифр → '-'."""
@@ -53,7 +56,7 @@ class Remapper:
             return path
         for old, new in self.rules:
             if path == old or path.startswith(old + "/") or path.startswith(old + "\\"):
-                return new + path[len(old):]
+                return new + path[len(old) :]
         return path
 
 
@@ -64,10 +67,8 @@ def read_jsonl(path: Path) -> list[dict]:
             line = line.strip()
             if not line:
                 continue
-            try:
+            with contextlib.suppress(json.JSONDecodeError):
                 out.append(json.loads(line))
-            except json.JSONDecodeError:
-                pass
     return out
 
 
@@ -82,16 +83,26 @@ def write_jsonl(path: Path, entries: Iterable[dict]) -> None:
 
 # ---------------------------------------------------------------- модель импортируемой сессии
 
+
 class ImportItem:
-    def __init__(self, src: Path, kind: str, session_id: str, cwd: str | None,
-                 entries: list[dict], subagent_of: str | None = None, agent_name: str | None = None,
-                 title: str | None = None):
+    def __init__(
+        self,
+        src: Path,
+        kind: str,
+        session_id: str,
+        cwd: str | None,
+        entries: list[dict],
+        subagent_of: str | None = None,
+        agent_name: str | None = None,
+        title: str | None = None,
+    ):
         self.src, self.kind = src, kind
         self.session_id, self.cwd, self.entries = session_id, cwd, entries
         self.subagent_of, self.agent_name, self.title = subagent_of, agent_name, title
 
 
 # ---------------------------------------------------------------- raw .jsonl
+
 
 def load_raw(path: Path, index_by_file: dict[str, dict]) -> ImportItem | None:
     entries = read_jsonl(path)
@@ -115,6 +126,7 @@ def load_raw(path: Path, index_by_file: dict[str, dict]) -> ImportItem | None:
 
 # ---------------------------------------------------------------- .json → записи Claude Code
 
+
 def blocks_to_api(blocks: list[dict]) -> list[dict]:
     out = []
     for b in blocks:
@@ -123,8 +135,14 @@ def blocks_to_api(blocks: list[dict]) -> list[dict]:
             if b.get("text"):
                 out.append({"type": "text", "text": b["text"]})
         elif t == "tool_use":
-            out.append({"type": "tool_use", "id": b.get("id") or f"toolu_{uuid.uuid4().hex[:24]}",
-                        "name": b.get("name") or "unknown", "input": b.get("input") or {}})
+            out.append(
+                {
+                    "type": "tool_use",
+                    "id": b.get("id") or f"toolu_{uuid.uuid4().hex[:24]}",
+                    "name": b.get("name") or "unknown",
+                    "input": b.get("input") or {},
+                }
+            )
         elif t == "tool_result":
             r = {"type": "tool_result", "tool_use_id": b.get("id"), "content": b.get("text") or ""}
             if b.get("is_error"):
@@ -150,7 +168,7 @@ def load_json(path: Path) -> ImportItem | None:
 
     sid = data.get("session_id") or path.stem
     subagent_of = agent_name = None
-    if "__" in sid:                       # так экспорт помечает субагентов: <session>__<agent>
+    if "__" in sid:  # так экспорт помечает субагентов: <session>__<agent>
         subagent_of, agent_name = sid.split("__", 1)
 
     cwd = data.get("project_path")
@@ -169,8 +187,15 @@ def load_json(path: Path) -> ImportItem | None:
         u = str(uuid.uuid4())
         msg: dict[str, Any] = {"role": role, "content": content}
         if role == "assistant":
-            msg.update({"model": m.get("model") or "imported", "type": "message",
-                        "id": f"msg_imported_{u[:12]}", "stop_reason": None, "usage": {}})
+            msg.update(
+                {
+                    "model": m.get("model") or "imported",
+                    "type": "message",
+                    "id": f"msg_imported_{u[:12]}",
+                    "stop_reason": None,
+                    "usage": {},
+                }
+            )
         elif len(content) == 1 and content[0]["type"] == "text":
             msg["content"] = content[0]["text"]
         e = {
@@ -184,7 +209,8 @@ def load_json(path: Path) -> ImportItem | None:
             "type": role,
             "message": msg,
             "uuid": u,
-            "timestamp": m.get("timestamp") or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "timestamp": m.get("timestamp")
+            or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         }
         if agent_name:
             e["agentId"] = agent_name.removeprefix("agent-")
@@ -193,10 +219,13 @@ def load_json(path: Path) -> ImportItem | None:
 
     if entries and entries[0].get("type") == "summary":
         entries[0]["leafUuid"] = parent
-    return ImportItem(path, "json", real_sid, cwd, entries, subagent_of, agent_name, data.get("title"))
+    return ImportItem(
+        path, "json", real_sid, cwd, entries, subagent_of, agent_name, data.get("title")
+    )
 
 
 # ---------------------------------------------------------------- преобразования
+
 
 def apply_remap(item: ImportItem, remap: Remapper) -> None:
     if not remap.rules:
@@ -223,6 +252,8 @@ def apply_new_id(item: ImportItem, id_map: dict[str, str]) -> None:
 
 
 def target_path(item: ImportItem, target_root: Path) -> Path:
+    if not item.cwd:
+        raise ValueError(f"{item.src}: неизвестен путь проекта (нет cwd)")
     proj = target_root / encode_project_dir(item.cwd)
     if item.subagent_of:
         return proj / item.subagent_of / "subagents" / f"{item.agent_name}.jsonl"
@@ -230,6 +261,7 @@ def target_path(item: ImportItem, target_root: Path) -> Path:
 
 
 # ---------------------------------------------------------------- main
+
 
 def collect(src: Path) -> list[ImportItem]:
     index_by_file: dict[str, dict] = {}
@@ -250,7 +282,7 @@ def collect(src: Path) -> list[ImportItem]:
         if f.suffix == ".jsonl":
             it = load_raw(f, index_by_file)
         elif f.with_suffix("") in raw_stems:
-            continue                                     # есть lossless-версия
+            continue  # есть lossless-версия
         else:
             it = load_json(f)
         if it:
@@ -261,14 +293,31 @@ def collect(src: Path) -> list[ImportItem]:
 def main() -> int:
     ap = argparse.ArgumentParser(description="Импорт переписки в Claude Code")
     ap.add_argument("source", type=Path, help="папка экспорта (или отдельный .jsonl/.json файл)")
-    ap.add_argument("-t", "--target", type=Path, default=DEFAULT_TARGET,
-                    help=f"куда импортировать (по умолчанию {DEFAULT_TARGET})")
-    ap.add_argument("--remap", action="append", default=[], metavar="OLD=NEW",
-                    help="заменить префикс пути проекта, напр. /Users/me=/home/me (можно несколько)")
-    ap.add_argument("--project", action="append", default=[],
-                    help="импортировать только проекты, путь которых содержит подстроку")
-    ap.add_argument("--new-ids", action="store_true",
-                    help="выдать сессиям новые id (импорт копий рядом с существующими)")
+    ap.add_argument(
+        "-t",
+        "--target",
+        type=Path,
+        default=DEFAULT_TARGET,
+        help=f"куда импортировать (по умолчанию {DEFAULT_TARGET})",
+    )
+    ap.add_argument(
+        "--remap",
+        action="append",
+        default=[],
+        metavar="OLD=NEW",
+        help="заменить префикс пути проекта, напр. /Users/me=/home/me (можно несколько)",
+    )
+    ap.add_argument(
+        "--project",
+        action="append",
+        default=[],
+        help="импортировать только проекты, путь которых содержит подстроку",
+    )
+    ap.add_argument(
+        "--new-ids",
+        action="store_true",
+        help="выдать сессиям новые id (импорт копий рядом с существующими)",
+    )
     ap.add_argument("--overwrite", action="store_true", help="перезаписывать существующие сессии")
     ap.add_argument("--dry-run", action="store_true", help="только показать, что будет сделано")
     opts = ap.parse_args()
@@ -290,7 +339,9 @@ def main() -> int:
     for it in sorted(items, key=lambda i: (i.subagent_of is not None, str(i.src))):
         apply_remap(it, remap)
         if not it.cwd:
-            print(f"  ! {it.src.name}: неизвестен путь проекта (нет cwd), пропускаю", file=sys.stderr)
+            print(
+                f"  ! {it.src.name}: неизвестен путь проекта (нет cwd), пропускаю", file=sys.stderr
+            )
             stats["nocwd"] += 1
             continue
         if opts.project and not any(p.lower() in it.cwd.lower() for p in opts.project):
@@ -309,14 +360,16 @@ def main() -> int:
         if not opts.dry_run:
             if it.kind == "raw" and not remap.rules and not opts.new_ids:
                 dst.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(it.src, dst)               # байт в байт
+                shutil.copy2(it.src, dst)  # байт в байт
             else:
                 write_jsonl(dst, it.entries)
         stats["ok"] += 1
 
     verb = "Будет импортировано" if opts.dry_run else "Импортировано"
-    print(f"\n✅ {verb}: {stats['ok']}, пропущено (уже есть): {stats['skip']}, "
-          f"без пути проекта: {stats['nocwd']}")
+    print(
+        f"\n✅ {verb}: {stats['ok']}, пропущено (уже есть): {stats['skip']}, "
+        f"без пути проекта: {stats['nocwd']}"
+    )
     if stats["ok"] and not opts.dry_run:
         print("Откройте проект и запустите `claude --resume`, чтобы выбрать сессию.")
     return 0

@@ -11,6 +11,28 @@
 
 - Python 3.9 или новее
 - Сторонние пакеты не нужны, используется только стандартная библиотека
+- [uv](https://docs.astral.sh/uv/) — по желанию, для установки команд и разработки
+
+## Установка
+
+Скрипты можно запускать напрямую (`python3 export_claude_code.py`), а можно поставить как команды:
+
+```bash
+uv tool install .
+```
+
+После этого доступны `claude-code-export` и `claude-code-import` с теми же опциями. Без установки их можно вызвать из папки проекта через `uv run claude-code-export ...`.
+
+## Разработка
+
+Проект оформлен через uv, линтер и форматтер — [ruff](https://docs.astral.sh/ruff/), проверка типов — [ty](https://docs.astral.sh/ty/). Настройки лежат в `pyproject.toml`.
+
+```bash
+uv sync                    # окружение и dev-зависимости
+uv run ruff check          # линтер
+uv run ruff format         # форматирование
+uv run ty check            # проверка типов
+```
 
 ## Где Claude Code хранит переписку
 
