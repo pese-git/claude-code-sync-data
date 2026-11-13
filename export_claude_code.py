@@ -21,7 +21,7 @@ import json
 import re
 import shutil
 import sys
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,6 +29,9 @@ from typing import Any
 
 DEFAULT_SOURCE = Path.home() / ".claude" / "projects"
 TOOL_RESULT_LIMIT = 4000  # символов результата инструмента в Markdown
+
+# Расширение файла для каждого формата. Порядок задаёт, на какой файл ссылается INDEX.md.
+FORMAT_EXT = {"md": ".md", "json": ".json", "raw": ".jsonl"}
 
 
 # ---------------------------------------------------------------- модель данных
@@ -62,6 +65,17 @@ class Session:
         return next((m.timestamp for m in reversed(self.messages) if m.timestamp), None)
 
 
+@dataclass
+class RenderOptions:
+    """Что включать в Markdown."""
+
+    tools: bool = False
+    thinking: bool = False
+    sidechain: bool = False
+    keep_noise: bool = False  # --raw: не вырезать служебные сообщения
+    max_tool_output: int = TOOL_RESULT_LIMIT
+
+
 # ---------------------------------------------------------------- парсинг
 
 
@@ -77,49 +91,49 @@ def read_jsonl(path: Path) -> Iterable[dict]:
                 print(f"  ! {path.name}:{n}: битая строка JSON, пропускаю", file=sys.stderr)
 
 
+def as_list(value: Any) -> list:
+    return value if isinstance(value, list) else [value]
+
+
+def normalize_block(b: Any) -> dict | None:
+    """Один блок message.content → нормализованный блок (или None, если это не блок)."""
+    if isinstance(b, str):
+        return {"type": "text", "text": b}
+    if not isinstance(b, dict):
+        return None
+    t = b.get("type")
+    if t == "text":
+        return {"type": "text", "text": b.get("text", "")}
+    if t == "thinking":
+        return {"type": "thinking", "text": b.get("thinking", "")}
+    if t == "redacted_thinking":
+        return {"type": "thinking", "text": "[скрыто]"}
+    if t == "tool_use":
+        return {
+            "type": "tool_use",
+            "id": b.get("id"),
+            "name": b.get("name"),
+            "input": b.get("input", {}),
+        }
+    if t == "tool_result":
+        return {
+            "type": "tool_result",
+            "id": b.get("tool_use_id"),
+            "is_error": bool(b.get("is_error")),
+            "text": flatten_tool_result(b.get("content")),
+        }
+    if t == "image":
+        return {"type": "image"}
+    return {"type": t or "unknown", "raw": b}
+
+
 def normalize_content(content: Any) -> list[dict]:
     """Приводит message.content (строка или список блоков) к списку блоков."""
     if content is None:
         return []
     if isinstance(content, str):
         return [{"type": "text", "text": content}]
-    blocks = []
-    for b in content if isinstance(content, list) else [content]:
-        if isinstance(b, str):
-            blocks.append({"type": "text", "text": b})
-            continue
-        if not isinstance(b, dict):
-            continue
-        t = b.get("type")
-        if t == "text":
-            blocks.append({"type": "text", "text": b.get("text", "")})
-        elif t == "thinking":
-            blocks.append({"type": "thinking", "text": b.get("thinking", "")})
-        elif t == "redacted_thinking":
-            blocks.append({"type": "thinking", "text": "[скрыто]"})
-        elif t == "tool_use":
-            blocks.append(
-                {
-                    "type": "tool_use",
-                    "id": b.get("id"),
-                    "name": b.get("name"),
-                    "input": b.get("input", {}),
-                }
-            )
-        elif t == "tool_result":
-            blocks.append(
-                {
-                    "type": "tool_result",
-                    "id": b.get("tool_use_id"),
-                    "is_error": bool(b.get("is_error")),
-                    "text": flatten_tool_result(b.get("content")),
-                }
-            )
-        elif t == "image":
-            blocks.append({"type": "image"})
-        else:
-            blocks.append({"type": t or "unknown", "raw": b})
-    return blocks
+    return [nb for b in as_list(content) if (nb := normalize_block(b)) is not None]
 
 
 def flatten_tool_result(content: Any) -> str:
@@ -128,17 +142,28 @@ def flatten_tool_result(content: Any) -> str:
     if isinstance(content, str):
         return content
     parts = []
-    for c in content if isinstance(content, list) else [content]:
-        if isinstance(c, dict):
-            if c.get("type") == "text":
-                parts.append(c.get("text", ""))
-            elif c.get("type") == "image":
-                parts.append("[изображение]")
-            else:
-                parts.append(json.dumps(c, ensure_ascii=False))
-        else:
+    for c in as_list(content):
+        if not isinstance(c, dict):
             parts.append(str(c))
+        elif c.get("type") == "text":
+            parts.append(c.get("text", ""))
+        elif c.get("type") == "image":
+            parts.append("[изображение]")
+        else:
+            parts.append(json.dumps(c, ensure_ascii=False))
     return "\n".join(parts)
+
+
+def merge_assistant_chunks(messages: list[Message]) -> list[Message]:
+    """Сообщения ассистента приходят кусками (по блоку на запись) — склеиваем подряд идущие."""
+    merged: list[Message] = []
+    for m in messages:
+        prev = merged[-1] if merged else None
+        if prev and m.role == prev.role == "assistant" and m.is_sidechain == prev.is_sidechain:
+            prev.blocks.extend(m.blocks)
+        else:
+            merged.append(m)
+    return merged
 
 
 def parse_session(path: Path, project_dir: str) -> Session:
@@ -171,32 +196,18 @@ def parse_session(path: Path, project_dir: str) -> Session:
 
         msg = e.get("message") or {}
         blocks = normalize_content(msg.get("content"))
-        if not blocks:
-            continue
-
-        s.messages.append(
-            Message(
-                role=msg.get("role") or etype,
-                timestamp=e.get("timestamp"),
-                blocks=blocks,
-                is_sidechain=bool(e.get("isSidechain")),
-                model=msg.get("model"),
+        if blocks:
+            s.messages.append(
+                Message(
+                    role=msg.get("role") or etype,
+                    timestamp=e.get("timestamp"),
+                    blocks=blocks,
+                    is_sidechain=bool(e.get("isSidechain")),
+                    model=msg.get("model"),
+                )
             )
-        )
 
-    # Сообщения ассистента приходят кусками (по блоку на запись) — склеиваем подряд идущие
-    merged: list[Message] = []
-    for m in s.messages:
-        if (
-            merged
-            and m.role == "assistant"
-            and merged[-1].role == "assistant"
-            and merged[-1].is_sidechain == m.is_sidechain
-        ):
-            merged[-1].blocks.extend(m.blocks)
-        else:
-            merged.append(m)
-    s.messages = merged
+    s.messages = merge_assistant_chunks(s.messages)
     return s
 
 
@@ -206,6 +217,10 @@ def iter_session_files(project: Path) -> Iterable[Path]:
     yield from sorted(project.glob("*/subagents/*.jsonl"))
 
 
+def is_subagent_file(path: Path) -> bool:
+    return path.parent.name == "subagents"
+
+
 # ---------------------------------------------------------------- фильтр шума
 
 SYSTEM_NOISE = re.compile(
@@ -213,6 +228,7 @@ SYSTEM_NOISE = re.compile(
     r"Caveat: The messages below|\[Request interrupted)",
     re.S,
 )
+SYSTEM_REMINDER = re.compile(r"<system-reminder>.*?</system-reminder>", re.S)
 
 
 def is_noise(text: str) -> bool:
@@ -220,7 +236,7 @@ def is_noise(text: str) -> bool:
 
 
 def strip_system_reminders(text: str) -> str:
-    return re.sub(r"<system-reminder>.*?</system-reminder>", "", text, flags=re.S).strip()
+    return SYSTEM_REMINDER.sub("", text).strip()
 
 
 # ---------------------------------------------------------------- Markdown
@@ -230,8 +246,7 @@ def fmt_ts(ts: str | None) -> str:
     if not ts:
         return ""
     try:
-        dt = datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone()
-        return dt.strftime("%Y-%m-%d %H:%M:%S")
+        return parse_iso(ts).astimezone().strftime("%Y-%m-%d %H:%M:%S")
     except ValueError:
         return ts
 
@@ -243,16 +258,52 @@ def fence(text: str, lang: str = "") -> str:
     return f"{ticks}{lang}\n{text}\n{ticks}"
 
 
+def details(summary: str, body: str) -> str:
+    return f"<details><summary>{summary}</summary>\n\n{body}\n\n</details>"
+
+
 def truncate(text: str, limit: int) -> str:
     if limit and len(text) > limit:
         return text[:limit] + f"\n… [обрезано, всего {len(text)} символов]"
     return text
 
 
-def session_to_markdown(s: Session, opts: argparse.Namespace, heading_level: int = 1) -> str:
+def render_block(b: dict, opts: RenderOptions) -> str | None:
+    """Markdown для одного блока или None, если блок не показываем."""
+    t = b["type"]
+    if t == "text":
+        text = strip_system_reminders(b["text"])
+        if not text or (not opts.keep_noise and is_noise(text)):
+            return None
+        return text
+    if t == "thinking" and opts.thinking and b["text"].strip():
+        return details("💭 Размышления", b["text"].strip())
+    if t == "tool_use" and opts.tools:
+        args = json.dumps(b["input"], ensure_ascii=False, indent=2)
+        return f"🔧 **{b['name']}**\n\n" + fence(args, "json")
+    if t == "tool_result" and opts.tools:
+        label = "❌ Ошибка инструмента" if b["is_error"] else "📤 Результат"
+        return details(label, fence(truncate(b["text"], opts.max_tool_output)))
+    if t == "image":
+        return "_[изображение]_"
+    return None
+
+
+def speaker(m: Message) -> str:
+    if all(b["type"] == "tool_result" for b in m.blocks):
+        who = "⚙️ Инструмент"
+    elif m.role == "user":
+        who = "👤 Пользователь"
+    else:
+        who = "🤖 Claude"
+    return who + " (субагент)" if m.is_sidechain else who
+
+
+def session_to_markdown(s: Session, opts: RenderOptions, heading_level: int = 1) -> str:
     h = "#" * heading_level
-    out = [f"{h} {s.title or 'Сессия ' + s.session_id}", ""]
-    out += [
+    out = [
+        f"{h} {s.title or 'Сессия ' + s.session_id}",
+        "",
         f"- **Проект:** `{s.project_path or s.project_dir}`",
         f"- **Сессия:** `{s.session_id}`",
         f"- **Начало:** {fmt_ts(s.started)}",
@@ -265,48 +316,9 @@ def session_to_markdown(s: Session, opts: argparse.Namespace, heading_level: int
     for m in s.messages:
         if m.is_sidechain and not opts.sidechain:
             continue
-        parts: list[str] = []
-        for b in m.blocks:
-            t = b["type"]
-            if t == "text":
-                text = strip_system_reminders(b["text"])
-                if not text or (not opts.raw and is_noise(text)):
-                    continue
-                parts.append(text)
-            elif t == "thinking" and opts.thinking and b["text"].strip():
-                parts.append(
-                    "<details><summary>💭 Размышления</summary>\n\n"
-                    + b["text"].strip()
-                    + "\n\n</details>"
-                )
-            elif t == "tool_use" and opts.tools:
-                parts.append(
-                    f"🔧 **{b['name']}**\n\n"
-                    + fence(json.dumps(b["input"], ensure_ascii=False, indent=2), "json")
-                )
-            elif t == "tool_result" and opts.tools:
-                label = "❌ Ошибка инструмента" if b["is_error"] else "📤 Результат"
-                parts.append(
-                    f"<details><summary>{label}</summary>\n\n"
-                    + fence(truncate(b["text"], opts.max_tool_output))
-                    + "\n\n</details>"
-                )
-            elif t == "image":
-                parts.append("_[изображение]_")
-        if not parts:
-            continue
-        only_results = all(b["type"] == "tool_result" for b in m.blocks)
-        who = (
-            "⚙️ Инструмент"
-            if only_results
-            else ("👤 Пользователь" if m.role == "user" else "🤖 Claude")
-        )
-        if m.is_sidechain:
-            who += " (субагент)"
-        out.append(f"{h}# {who}  ·  {fmt_ts(m.timestamp)}")
-        out.append("")
-        out.append("\n\n".join(parts))
-        out.append("")
+        parts = [p for b in m.blocks if (p := render_block(b, opts)) is not None]
+        if parts:
+            out += [f"{h}# {speaker(m)}  ·  {fmt_ts(m.timestamp)}", "", "\n\n".join(parts), ""]
     return "\n".join(out)
 
 
@@ -333,12 +345,11 @@ def session_to_dict(s: Session) -> dict:
     }
 
 
-# ---------------------------------------------------------------- main
+# ---------------------------------------------------------------- отбор сессий
 
 
-def safe_name(name: str, maxlen: int = 80) -> str:
-    name = re.sub(r"[^\w\-.]+", "_", name, flags=re.U).strip("_.")
-    return name[:maxlen] or "untitled"
+def parse_iso(ts: str) -> datetime:
+    return datetime.fromisoformat(ts.replace("Z", "+00:00"))
 
 
 def parse_date(s: str) -> datetime:
@@ -346,7 +357,96 @@ def parse_date(s: str) -> datetime:
     return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
 
 
-def main() -> int:
+def load_project_sessions(project: Path, with_subagents: bool) -> list[Session]:
+    """Все непустые сессии проекта; сессии субагентов — только если with_subagents."""
+    sessions = []
+    for f in iter_session_files(project):
+        try:
+            s = parse_session(f, project.name)
+        except OSError as e:
+            print(f"  ! не удалось прочитать {f}: {e}", file=sys.stderr)
+            continue
+        if not s.messages:
+            continue
+        if is_subagent_file(f):
+            s.session_id = f"{f.parent.parent.name}__{f.stem}"
+            if not with_subagents:
+                continue
+            for m in s.messages:
+                m.is_sidechain = False  # в отдельном файле показываем как обычные
+        sessions.append(s)
+    return sessions
+
+
+def project_matches(project: Path, sessions: list[Session], patterns: Sequence[str]) -> bool:
+    if not patterns:
+        return True
+    label = (sessions[0].project_path if sessions else None) or project.name
+    names = (label.lower(), project.name.lower())
+    return any(p.lower() in n for p in patterns for n in names)
+
+
+def in_range(s: Session, since: datetime | None, until: datetime | None) -> bool:
+    if not s.started:
+        return True
+    st = parse_date(s.started.replace("Z", "+00:00"))
+    return (not since or st >= since) and (not until or st < until)
+
+
+# ---------------------------------------------------------------- запись
+
+
+def safe_name(name: str, maxlen: int = 80) -> str:
+    name = re.sub(r"[^\w\-.]+", "_", name, flags=re.U).strip("_.")
+    return name[:maxlen] or "untitled"
+
+
+def write_json(path: Path, data: Any) -> None:
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def session_basename(s: Session) -> str:
+    """Имя файла без расширения: <дата>_<заголовок>_<id>."""
+    date = (s.started or "")[:10] or "nodate"
+    sid = safe_name(s.session_id) if "__" in s.session_id else s.session_id[:8]
+    return f"{date}_{safe_name(s.title, 50)}_{sid}" if s.title else f"{date}_{sid}"
+
+
+def export_session(s: Session, base: Path, formats: Sequence[str], opts: RenderOptions) -> None:
+    if "md" in formats:
+        base.with_name(base.name + ".md").write_text(session_to_markdown(s, opts), encoding="utf-8")
+    if "json" in formats:
+        write_json(base.with_name(base.name + ".json"), session_to_dict(s))
+    if "raw" in formats:
+        shutil.copy2(s.file, base.with_name(base.name + ".jsonl"))  # байт в байт
+
+
+def write_index(out_root: Path, index: list[dict], formats: Sequence[str]) -> None:
+    ext = next(e for f, e in FORMAT_EXT.items() if f in formats)
+    lines = [
+        "# Экспорт Claude Code",
+        "",
+        f"Экспортировано: {datetime.now():%Y-%m-%d %H:%M}, сессий: {len(index)}",
+        "",
+    ]
+    current = None
+    for it in index:
+        if it["project"] != current:
+            current = it["project"]
+            lines += ["", f"## `{current}`", ""]
+        link = (it["file"] + ext).replace(" ", "%20")
+        lines.append(
+            f"- {fmt_ts(it['started'])} — [{it['title'] or it['session_id'][:8]}]"
+            f"({link}) ({it['messages']} сообщ.)"
+        )
+    (out_root / "INDEX.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    write_json(out_root / "index.json", index)
+
+
+# ---------------------------------------------------------------- main
+
+
+def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="Экспорт переписки Claude Code по всем проектам")
     ap.add_argument(
         "-s",
@@ -365,7 +465,7 @@ def main() -> int:
     ap.add_argument(
         "--format",
         nargs="+",
-        choices=["md", "json", "raw"],
+        choices=list(FORMAT_EXT),
         default=["md"],
         help="форматы вывода: md, json, raw (можно несколько; raw — копия .jsonl для импорта)",
     )
@@ -385,7 +485,10 @@ def main() -> int:
     ap.add_argument("--thinking", action="store_true", help="включить блоки размышлений")
     ap.add_argument("--sidechain", action="store_true", help="включить сообщения субагентов")
     ap.add_argument(
-        "--raw", action="store_true", help="не фильтровать служебные сообщения (/команды и т.п.)"
+        "--raw",
+        dest="keep_noise",
+        action="store_true",
+        help="не фильтровать служебные сообщения (/команды и т.п.)",
     )
     ap.add_argument(
         "--max-tool-output",
@@ -398,57 +501,38 @@ def main() -> int:
         action="store_true",
         help="дополнительно собрать всё в один all_conversations.md",
     )
-    opts = ap.parse_args()
+    return ap
 
-    src: Path = opts.source.expanduser()
+
+def main() -> int:
+    args = build_parser().parse_args()
+    opts = RenderOptions(
+        tools=args.tools,
+        thinking=args.thinking,
+        sidechain=args.sidechain,
+        keep_noise=args.keep_noise,
+        max_tool_output=args.max_tool_output,
+    )
+
+    src: Path = args.source.expanduser()
     if not src.is_dir():
         print(f"Не найдена папка {src}. Укажите путь через --source.", file=sys.stderr)
         return 1
 
-    out_root: Path = opts.output.expanduser()
+    out_root: Path = args.output.expanduser()
     out_root.mkdir(parents=True, exist_ok=True)
 
     index: list[dict] = []
     all_md: list[str] = []
-    total = 0
 
     for project in sorted(p for p in src.iterdir() if p.is_dir()):
-        files = list(iter_session_files(project))
-        if not files:
+        sessions = load_project_sessions(project, with_subagents=args.sidechain)
+        if not project_matches(project, sessions, args.project):
             continue
-
-        sessions = []
-        for f in files:
-            try:
-                s = parse_session(f, project.name)
-            except OSError as e:
-                print(f"  ! не удалось прочитать {f}: {e}", file=sys.stderr)
-                continue
-            if not s.messages:
-                continue
-            if f.parent.name == "subagents":
-                s.session_id = f"{f.parent.parent.name}__{f.stem}"
-                if not opts.sidechain:
-                    continue
-                for m in s.messages:
-                    m.is_sidechain = False  # в отдельном файле показываем как обычные
-            sessions.append(s)
-
-        if opts.project:
-            label = (sessions[0].project_path if sessions else None) or project.name
-            if not any(
-                p.lower() in label.lower() or p.lower() in project.name.lower()
-                for p in opts.project
-            ):
-                continue
-
-        def in_range(s: Session) -> bool:
-            if not s.started:
-                return True
-            st = parse_date(s.started.replace("Z", "+00:00"))
-            return (not opts.since or st >= opts.since) and (not opts.until or st < opts.until)
-
-        sessions = sorted(filter(in_range, sessions), key=lambda s: s.started or "")
+        sessions = sorted(
+            (s for s in sessions if in_range(s, args.since, args.until)),
+            key=lambda s: s.started or "",
+        )
         if not sessions:
             continue
 
@@ -457,23 +541,13 @@ def main() -> int:
         proj_out.mkdir(parents=True, exist_ok=True)
         print(f"📁 {proj_label}  —  {len(sessions)} сесс.")
 
-        if opts.single_file:
+        if args.single_file:
             all_md.append(f"# Проект: {proj_label}\n")
 
         for s in sessions:
-            date = (s.started or "")[:10] or "nodate"
-            sid = safe_name(s.session_id) if "__" in s.session_id else s.session_id[:8]
-            base = f"{date}_{safe_name(s.title or '', 50)}_{sid}" if s.title else f"{date}_{sid}"
-
-            if "md" in opts.format:
-                (proj_out / f"{base}.md").write_text(session_to_markdown(s, opts), encoding="utf-8")
-            if "json" in opts.format:
-                (proj_out / f"{base}.json").write_text(
-                    json.dumps(session_to_dict(s), ensure_ascii=False, indent=2), encoding="utf-8"
-                )
-            if "raw" in opts.format:
-                shutil.copy2(s.file, proj_out / f"{base}.jsonl")  # байт в байт
-            if opts.single_file:
+            base = proj_out / session_basename(s)
+            export_session(s, base, args.format, opts)
+            if args.single_file:
                 all_md.append(session_to_markdown(s, opts, heading_level=2))
 
             index.append(
@@ -484,42 +558,17 @@ def main() -> int:
                     "started": s.started,
                     "ended": s.ended,
                     "messages": len(s.messages),
-                    "file": str((proj_out / base).relative_to(out_root)),
+                    "file": str(base.relative_to(out_root)),
                     # исходное место: по нему импорт узнаёт субагентов (<session>/subagents/…)
                     "source_rel": s.file.relative_to(src).as_posix(),
                 }
             )
-            total += 1
 
-    # Оглавление
-    lines = [
-        "# Экспорт Claude Code",
-        "",
-        f"Экспортировано: {datetime.now():%Y-%m-%d %H:%M}, сессий: {total}",
-        "",
-    ]
-    current = None
-    ext = next(
-        e for f, e in (("md", ".md"), ("json", ".json"), ("raw", ".jsonl")) if f in opts.format
-    )
-    for it in index:
-        if it["project"] != current:
-            current = it["project"]
-            lines += ["", f"## `{current}`", ""]
-        link = it["file"] + ext
-        lines.append(
-            f"- {fmt_ts(it['started'])} — [{it['title'] or it['session_id'][:8]}]"
-            f"({link.replace(' ', '%20')}) ({it['messages']} сообщ.)"
-        )
-    (out_root / "INDEX.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
-    (out_root / "index.json").write_text(
-        json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-
-    if opts.single_file:
+    write_index(out_root, index, args.format)
+    if args.single_file:
         (out_root / "all_conversations.md").write_text("\n\n---\n\n".join(all_md), encoding="utf-8")
 
-    print(f"\n✅ Готово: {total} сессий → {out_root.resolve()}")
+    print(f"\n✅ Готово: {len(index)} сессий → {out_root.resolve()}")
     return 0
 
 

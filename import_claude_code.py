@@ -26,12 +26,15 @@ import re
 import shutil
 import sys
 import uuid
+from collections import Counter
 from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 DEFAULT_TARGET = Path.home() / ".claude" / "projects"
+UUID_FIELDS = ("uuid", "parentUuid", "leafUuid", "logicalParentUuid")
 
 
 # ---------------------------------------------------------------- утилиты
@@ -42,7 +45,18 @@ def encode_project_dir(path: str) -> str:
     return re.sub(r"[^A-Za-z0-9]", "-", path)
 
 
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def first(entries: Iterable[dict], key: str) -> Any:
+    """Первое непустое значение поля среди записей."""
+    return next((e[key] for e in entries if e.get(key)), None)
+
+
 class Remapper:
+    """Замена префиксов путей по правилам OLD=NEW (первое совпадение)."""
+
     def __init__(self, rules: list[str]):
         self.rules: list[tuple[str, str]] = []
         for r in rules:
@@ -55,7 +69,7 @@ class Remapper:
         if not path:
             return path
         for old, new in self.rules:
-            if path == old or path.startswith(old + "/") or path.startswith(old + "\\"):
+            if path == old or path.startswith((old + "/", old + "\\")):
                 return new + path[len(old) :]
         return path
 
@@ -84,83 +98,107 @@ def write_jsonl(path: Path, entries: Iterable[dict]) -> None:
 # ---------------------------------------------------------------- модель импортируемой сессии
 
 
+@dataclass
 class ImportItem:
-    def __init__(
-        self,
-        src: Path,
-        kind: str,
-        session_id: str,
-        cwd: str | None,
-        entries: list[dict],
-        subagent_of: str | None = None,
-        agent_name: str | None = None,
-        title: str | None = None,
-    ):
-        self.src, self.kind = src, kind
-        self.session_id, self.cwd, self.entries = session_id, cwd, entries
-        self.subagent_of, self.agent_name, self.title = subagent_of, agent_name, title
+    src: Path
+    kind: str  # raw | json
+    session_id: str
+    cwd: str | None
+    entries: list[dict]
+    subagent_of: str | None = None  # id родительской сессии, если это субагент
+    agent_name: str | None = None  # agent-<id>
+    title: str | None = None
 
 
 # ---------------------------------------------------------------- raw .jsonl
+
+
+def detect_subagent(
+    entries: list[dict], session_id: str | None, meta: dict | None
+) -> tuple[str | None, str | None]:
+    """(родительская сессия, имя агента) или (None, None) для обычной сессии."""
+    if meta:
+        # source_rel из index.json: …/<session>/subagents/<agent>.jsonl
+        parts = Path(meta["source_rel"]).parts if meta.get("source_rel") else ()
+        if len(parts) >= 4 and parts[-2] == "subagents":
+            return parts[-3], Path(parts[-1]).stem
+        return None, None
+    # Без index.json: в записях субагента есть agentId, а sessionId — родительская сессия
+    agent_id = first(entries, "agentId")
+    if agent_id and session_id and all(e.get("isSidechain") for e in entries if "isSidechain" in e):
+        return session_id, f"agent-{agent_id}"
+    return None, None
 
 
 def load_raw(path: Path, index_by_file: dict[str, dict]) -> ImportItem | None:
     entries = read_jsonl(path)
     if not entries:
         return None
-    sid = next((e["sessionId"] for e in entries if e.get("sessionId")), None)
-    cwd = next((e["cwd"] for e in entries if e.get("cwd")), None)
+    sid = first(entries, "sessionId")
     title = next((e.get("summary") for e in entries if e.get("type") == "summary"), None)
-
-    # Субагент? Определяем по source_rel из index.json (…/<session>/subagents/<agent>.jsonl)
-    meta = index_by_file.get(str(path.with_suffix("")))
-    subagent_of = agent_name = None
-    if meta and meta.get("source_rel"):
-        parts = Path(meta["source_rel"]).parts
-        if len(parts) >= 4 and parts[-2] == "subagents":
-            subagent_of, agent_name = parts[-3], Path(parts[-1]).stem
-    elif not meta:
-        # Без index.json: в записях субагента есть agentId, а sessionId — родительская сессия
-        agent_id = next((e["agentId"] for e in entries if e.get("agentId")), None)
-        if agent_id and sid and all(e.get("isSidechain") for e in entries if "isSidechain" in e):
-            subagent_of, agent_name = sid, f"agent-{agent_id}"
-    if not sid:
-        sid = path.stem
-    return ImportItem(path, "raw", sid, cwd, entries, subagent_of, agent_name, title)
+    subagent_of, agent_name = detect_subagent(
+        entries, sid, index_by_file.get(str(path.with_suffix("")))
+    )
+    return ImportItem(
+        path,
+        "raw",
+        sid or path.stem,
+        first(entries, "cwd"),
+        entries,
+        subagent_of,
+        agent_name,
+        title,
+    )
 
 
 # ---------------------------------------------------------------- .json → записи Claude Code
 
 
+def block_to_api(b: dict) -> dict | None:
+    """Нормализованный блок экспорта → блок API (или None, если блок не восстанавливается)."""
+    t = b.get("type")
+    if t == "text":
+        return {"type": "text", "text": b["text"]} if b.get("text") else None
+    if t == "tool_use":
+        return {
+            "type": "tool_use",
+            "id": b.get("id") or f"toolu_{uuid.uuid4().hex[:24]}",
+            "name": b.get("name") or "unknown",
+            "input": b.get("input") or {},
+        }
+    if t == "tool_result":
+        r = {"type": "tool_result", "tool_use_id": b.get("id"), "content": b.get("text") or ""}
+        if b.get("is_error"):
+            r["is_error"] = True
+        return r
+    if t == "image":
+        return {"type": "text", "text": "[изображение не сохранено при экспорте]"}
+    if t == "thinking":
+        # Без криптографической подписи API отклонит такой блок при продолжении сессии
+        return None
+    raw = b.get("raw")
+    return raw if isinstance(raw, dict) else None
+
+
 def blocks_to_api(blocks: list[dict]) -> list[dict]:
-    out = []
-    for b in blocks:
-        t = b.get("type")
-        if t == "text":
-            if b.get("text"):
-                out.append({"type": "text", "text": b["text"]})
-        elif t == "tool_use":
-            out.append(
-                {
-                    "type": "tool_use",
-                    "id": b.get("id") or f"toolu_{uuid.uuid4().hex[:24]}",
-                    "name": b.get("name") or "unknown",
-                    "input": b.get("input") or {},
-                }
-            )
-        elif t == "tool_result":
-            r = {"type": "tool_result", "tool_use_id": b.get("id"), "content": b.get("text") or ""}
-            if b.get("is_error"):
-                r["is_error"] = True
-            out.append(r)
-        elif t == "image":
-            out.append({"type": "text", "text": "[изображение не сохранено при экспорте]"})
-        elif t == "thinking":
-            # Без криптографической подписи API отклонит такой блок при продолжении сессии
-            continue
-        elif "raw" in b and isinstance(b["raw"], dict):
-            out.append(b["raw"])
-    return out
+    return [ab for b in blocks if (ab := block_to_api(b)) is not None]
+
+
+def build_message(role: str, content: list[dict], model: str | None, msg_uuid: str) -> dict:
+    msg: dict[str, Any] = {"role": role, "content": content}
+    if role == "assistant":
+        msg.update(
+            {
+                "model": model or "imported",
+                "type": "message",
+                "id": f"msg_imported_{msg_uuid[:12]}",
+                "stop_reason": None,
+                "usage": {},
+            }
+        )
+    elif len(content) == 1 and content[0]["type"] == "text":
+        msg["content"] = content[0]["text"]
+    return msg
 
 
 def load_json(path: Path) -> ImportItem | None:
@@ -175,34 +213,20 @@ def load_json(path: Path) -> ImportItem | None:
     subagent_of = agent_name = None
     if "__" in sid:  # так экспорт помечает субагентов: <session>__<agent>
         subagent_of, agent_name = sid.split("__", 1)
-
+    real_sid = subagent_of or sid
     cwd = data.get("project_path")
-    branch = data.get("git_branch")
+
     entries: list[dict] = []
     if data.get("title"):
         entries.append({"type": "summary", "summary": data["title"], "leafUuid": None})
 
     parent = None
-    real_sid = subagent_of or sid
     for m in data["messages"]:
         content = blocks_to_api(m.get("content") or [])
         if not content:
             continue
         role = m.get("role") if m.get("role") in ("user", "assistant") else "user"
         u = str(uuid.uuid4())
-        msg: dict[str, Any] = {"role": role, "content": content}
-        if role == "assistant":
-            msg.update(
-                {
-                    "model": m.get("model") or "imported",
-                    "type": "message",
-                    "id": f"msg_imported_{u[:12]}",
-                    "stop_reason": None,
-                    "usage": {},
-                }
-            )
-        elif len(content) == 1 and content[0]["type"] == "text":
-            msg["content"] = content[0]["text"]
         e = {
             "parentUuid": parent,
             "isSidechain": bool(m.get("is_sidechain")) or bool(subagent_of),
@@ -210,12 +234,11 @@ def load_json(path: Path) -> ImportItem | None:
             "cwd": cwd,
             "sessionId": real_sid,
             "version": "imported",
-            "gitBranch": branch or "",
+            "gitBranch": data.get("git_branch") or "",
             "type": role,
-            "message": msg,
+            "message": build_message(role, content, m.get("model"), u),
             "uuid": u,
-            "timestamp": m.get("timestamp")
-            or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "timestamp": m.get("timestamp") or now_iso(),
         }
         if agent_name:
             e["agentId"] = agent_name.removeprefix("agent-")
@@ -242,8 +265,8 @@ def apply_remap(item: ImportItem, remap: Remapper) -> None:
 
 
 def apply_new_id(item: ImportItem, id_map: dict[str, str]) -> None:
-    old = item.subagent_of or item.session_id
-    new = id_map.setdefault(old, str(uuid.uuid4()))
+    """Новый id сессии (общий для сессии и её субагентов) и новые uuid записей."""
+    new = id_map.setdefault(item.subagent_of or item.session_id, str(uuid.uuid4()))
     if item.subagent_of:
         item.subagent_of = new
     item.session_id = new
@@ -251,7 +274,7 @@ def apply_new_id(item: ImportItem, id_map: dict[str, str]) -> None:
     for e in item.entries:
         if e.get("sessionId"):
             e["sessionId"] = new
-        for k in ("uuid", "parentUuid", "leafUuid", "logicalParentUuid"):
+        for k in UUID_FIELDS:
             if e.get(k):
                 e[k] = uuid_map.setdefault(e[k], str(uuid.uuid4()))
 
@@ -265,19 +288,25 @@ def target_path(item: ImportItem, target_root: Path) -> Path:
     return proj / f"{item.session_id}.jsonl"
 
 
-# ---------------------------------------------------------------- main
+# ---------------------------------------------------------------- поиск источников
+
+
+def load_index(src: Path) -> dict[str, dict]:
+    """index.json экспорта: путь файла без расширения → запись."""
+    idx = src / "index.json"
+    if not idx.is_file():
+        return {}
+    by_file: dict[str, dict] = {}
+    try:
+        for it in json.loads(idx.read_text(encoding="utf-8")):
+            by_file[str(src / it["file"])] = it
+    except (OSError, json.JSONDecodeError, KeyError, TypeError):
+        pass
+    return by_file
 
 
 def collect(src: Path) -> list[ImportItem]:
-    index_by_file: dict[str, dict] = {}
-    idx = src / "index.json"
-    if idx.is_file():
-        try:
-            for it in json.loads(idx.read_text(encoding="utf-8")):
-                index_by_file[str(src / it["file"])] = it
-        except (OSError, json.JSONDecodeError, KeyError, TypeError):
-            pass
-
+    index_by_file = load_index(src)
     files = [src] if src.is_file() else sorted(src.rglob("*.jsonl")) + sorted(src.rglob("*.json"))
     raw_stems = {f.with_suffix("") for f in files if f.suffix == ".jsonl"}
     items = []
@@ -295,7 +324,10 @@ def collect(src: Path) -> list[ImportItem]:
     return items
 
 
-def main() -> int:
+# ---------------------------------------------------------------- main
+
+
+def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="Импорт переписки в Claude Code")
     ap.add_argument("source", type=Path, help="папка экспорта (или отдельный .jsonl/.json файл)")
     ap.add_argument(
@@ -325,7 +357,19 @@ def main() -> int:
     )
     ap.add_argument("--overwrite", action="store_true", help="перезаписывать существующие сессии")
     ap.add_argument("--dry-run", action="store_true", help="только показать, что будет сделано")
-    opts = ap.parse_args()
+    return ap
+
+
+def write_item(item: ImportItem, dst: Path, rebuild: bool) -> None:
+    if item.kind == "raw" and not rebuild:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(item.src, dst)  # байт в байт
+    else:
+        write_jsonl(dst, item.entries)
+
+
+def main() -> int:
+    opts = build_parser().parse_args()
 
     src = opts.source.expanduser()
     if not src.exists():
@@ -333,6 +377,7 @@ def main() -> int:
         return 1
     target_root = opts.target.expanduser()
     remap = Remapper(opts.remap)
+    rebuild = bool(remap.rules) or opts.new_ids  # raw-файл нельзя просто скопировать
 
     items = collect(src)
     if not items:
@@ -340,7 +385,8 @@ def main() -> int:
         return 1
 
     id_map: dict[str, str] = {}
-    stats = {"ok": 0, "skip": 0, "nocwd": 0}
+    stats: Counter[str] = Counter()
+    # Сначала основные сессии, потом субагенты — чтобы id_map уже знал новые id родителей
     for it in sorted(items, key=lambda i: (i.subagent_of is not None, str(i.src))):
         apply_remap(it, remap)
         if not it.cwd:
@@ -363,11 +409,7 @@ def main() -> int:
 
         print(f"  {'(dry) ' if opts.dry_run else ''}+ {label}\n      → {dst}")
         if not opts.dry_run:
-            if it.kind == "raw" and not remap.rules and not opts.new_ids:
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(it.src, dst)  # байт в байт
-            else:
-                write_jsonl(dst, it.entries)
+            write_item(it, dst, rebuild)
         stats["ok"] += 1
 
     verb = "Будет импортировано" if opts.dry_run else "Импортировано"
