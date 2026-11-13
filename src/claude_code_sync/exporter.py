@@ -1,17 +1,16 @@
-#!/usr/bin/env python3
 """
-Экспорт переписки Claude Code для всех проектов.
+Команда `claude-code-sync export`: выгрузка переписки Claude Code по всем проектам.
 
-Claude Code хранит сессии в ~/.claude/projects/<закодированный-путь>/<session-id>.jsonl
-Скрипт проходит по всем проектам и сохраняет каждую сессию в Markdown и/или JSON.
+Читает сессии из ~/.claude/projects/<закодированный-путь>/<session-id>.jsonl и сохраняет
+каждую в Markdown (для чтения), JSON (для обработки) и/или raw (копия .jsonl для импорта).
 
 Примеры:
-    python export_claude_code.py
-    python export_claude_code.py -o ~/claude-export --format md json
-    python export_claude_code.py --project myapp --since 2026-10-01
-    python export_claude_code.py --tools --thinking          # с вызовами инструментов и размышлениями
-    python export_claude_code.py --single-file               # всё в один all_conversations.md
-    python export_claude_code.py --format md raw --sidechain # raw — для import_claude_code.py
+    claude-code-sync export
+    claude-code-sync export -o ~/claude-export --format md json
+    claude-code-sync export --project myapp --since 2026-10-01
+    claude-code-sync export --tools --thinking          # с вызовами инструментов и размышлениями
+    claude-code-sync export --single-file               # всё в один all_conversations.md
+    claude-code-sync export --format md raw --sidechain # raw — для claude-code-sync import
 """
 
 from __future__ import annotations
@@ -27,7 +26,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-DEFAULT_SOURCE = Path.home() / ".claude" / "projects"
+from .storage import DEFAULT_PROJECTS_DIR, iter_jsonl
+
 TOOL_RESULT_LIMIT = 4000  # символов результата инструмента в Markdown
 
 # Расширение файла для каждого формата. Порядок задаёт, на какой файл ссылается INDEX.md.
@@ -77,18 +77,6 @@ class RenderOptions:
 
 
 # ---------------------------------------------------------------- парсинг
-
-
-def read_jsonl(path: Path) -> Iterable[dict]:
-    with path.open(encoding="utf-8", errors="replace") as f:
-        for n, line in enumerate(f, 1):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                yield json.loads(line)
-            except json.JSONDecodeError:
-                print(f"  ! {path.name}:{n}: битая строка JSON, пропускаю", file=sys.stderr)
 
 
 def as_list(value: Any) -> list:
@@ -170,7 +158,7 @@ def parse_session(path: Path, project_dir: str) -> Session:
     s = Session(session_id=path.stem, project_dir=project_dir, project_path=None, file=path)
     seen_uuids: set[str] = set()
 
-    for e in read_jsonl(path):
+    for e in iter_jsonl(path, warn=True):
         etype = e.get("type")
 
         if etype == "summary" and e.get("summary") and not s.title:
@@ -443,17 +431,16 @@ def write_index(out_root: Path, index: list[dict], formats: Sequence[str]) -> No
     write_json(out_root / "index.json", index)
 
 
-# ---------------------------------------------------------------- main
+# ---------------------------------------------------------------- команда
 
 
-def build_parser() -> argparse.ArgumentParser:
-    ap = argparse.ArgumentParser(description="Экспорт переписки Claude Code по всем проектам")
+def add_arguments(ap: argparse.ArgumentParser) -> None:
     ap.add_argument(
         "-s",
         "--source",
         type=Path,
-        default=DEFAULT_SOURCE,
-        help=f"папка с проектами (по умолчанию {DEFAULT_SOURCE})",
+        default=DEFAULT_PROJECTS_DIR,
+        help=f"папка с проектами (по умолчанию {DEFAULT_PROJECTS_DIR})",
     )
     ap.add_argument(
         "-o",
@@ -501,11 +488,9 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="дополнительно собрать всё в один all_conversations.md",
     )
-    return ap
 
 
-def main() -> int:
-    args = build_parser().parse_args()
+def run(args: argparse.Namespace) -> int:
     opts = RenderOptions(
         tools=args.tools,
         thinking=args.thinking,
@@ -558,9 +543,8 @@ def main() -> int:
                     "started": s.started,
                     "ended": s.ended,
                     "messages": len(s.messages),
-                    "file": base.relative_to(
-                        out_root
-                    ).as_posix(),  # / и на Windows: это ссылка в INDEX.md
+                    # через / и на Windows: это ещё и ссылка в INDEX.md
+                    "file": base.relative_to(out_root).as_posix(),
                     # исходное место: по нему импорт узнаёт субагентов (<session>/subagents/…)
                     "source_rel": s.file.relative_to(src).as_posix(),
                 }
@@ -572,7 +556,3 @@ def main() -> int:
 
     print(f"\n✅ Готово: {len(index)} сессий → {out_root.resolve()}")
     return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

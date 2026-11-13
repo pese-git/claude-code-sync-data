@@ -15,7 +15,7 @@ from conftest import (
     Runner,
 )
 
-import export_claude_code as ex
+from claude_code_sync import exporter as ex
 
 # ---------------------------------------------------------------- нормализация блоков
 

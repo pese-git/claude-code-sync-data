@@ -2,10 +2,10 @@
 
 [![CI](https://github.com/pese-git/claude-code-sync-data/actions/workflows/ci.yml/badge.svg)](https://github.com/pese-git/claude-code-sync-data/actions/workflows/ci.yml)
 
-Два скрипта на Python для работы с историей сессий Claude Code:
+Команда `claude-code-sync` для работы с историей сессий Claude Code:
 
-- **`export_claude_code.py`** выгружает переписку всех проектов в Markdown (для чтения), JSON (для обработки) и raw (точная копия для переноса).
-- **`import_claude_code.py`** загружает экспорт обратно в Claude Code, после чего сессии снова открываются через `claude --resume`.
+- **`claude-code-sync export`** выгружает переписку всех проектов в Markdown (для чтения), JSON (для обработки) и raw (точная копия для переноса).
+- **`claude-code-sync import`** загружает экспорт обратно в Claude Code, после чего сессии снова открываются через `claude --resume`.
 
 Подходит для резервной копии, переноса истории на другой компьютер, поиска по старым разговорам и их архивации в читаемом виде.
 
@@ -17,7 +17,7 @@
 
 ## Установка
 
-Скрипты можно запускать напрямую (`python3 export_claude_code.py`), а можно поставить как команды `claude-code-export` и `claude-code-import`. Опции у команд те же, что у скриптов.
+После установки доступна команда `claude-code-sync` с подкомандами `export` и `import`. Прежние команды `claude-code-export` и `claude-code-import` тоже остались: это синонимы `claude-code-sync export` и `claude-code-sync import`.
 
 ### Через pipx
 
@@ -49,11 +49,11 @@
    pipx install /путь/к/claude-code-sync-data
    ```
 
-3. Проверьте, что команды доступны:
+3. Проверьте, что команда доступна:
 
    ```bash
-   claude-code-export --help
-   claude-code-import --help
+   claude-code-sync --version
+   claude-code-sync export --help
    ```
 
 **Обновление.** Номер версии пакета между коммитами не меняется, поэтому `pipx upgrade` сообщит, что всё актуально, и ничего не обновит. Чтобы поставить свежую версию из того же источника, переустановите пакет:
@@ -74,7 +74,7 @@ pipx uninstall claude-code-sync-data
 uv tool install git+https://github.com/pese-git/claude-code-sync-data.git
 ```
 
-Из папки проекта можно поставить локальную копию через `uv tool install .` или запускать команды без установки: `uv run claude-code-export ...`.
+Из папки проекта можно поставить локальную копию через `uv tool install .` или запускать команду без установки: `uv run claude-code-sync export ...`. Внутри любого окружения, где установлен пакет, работает и `python -m claude_code_sync`.
 
 ## Разработка
 
@@ -88,9 +88,20 @@ uv run ruff format         # форматирование
 uv run ty check            # проверка типов
 ```
 
+Код лежит в пакете `src/claude_code_sync/`:
+
+| Модуль | Что в нём |
+|---|---|
+| `cli.py` | Точка входа `claude-code-sync`: разбор аргументов и подкоманды |
+| `exporter.py` | Подкоманда `export` |
+| `importer.py` | Подкоманда `import` |
+| `storage.py` | Общее для команд: где лежит `~/.claude/projects`, как Claude Code называет папки проектов, чтение и запись JSONL |
+
+Каждая подкоманда — модуль с функциями `add_arguments(parser)` и `run(args)`; новая подкоманда подключается одной строкой в `COMMANDS` в `cli.py`.
+
 Те же проверки запускает GitHub Actions ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) на каждый push в `master` и на pull request: линтеры и ty, тесты на Python 3.9–3.14 в Linux и на крайних версиях в macOS и Windows.
 
-Тесты в `tests/` не трогают настоящую `~/.claude/projects`: каждый тест собирает синтетическую историю во временной папке (фикстура `history` в `tests/conftest.py`) и вызывает `main()` скриптов в том же процессе. Кроме отдельных функций, проверяется полный цикл экспорт → импорт: raw-формат восстанавливается байт в байт, из json собирается корректная цепочка сообщений, субагенты попадают на своё место, работают `--remap`, `--new-ids`, `--overwrite` и `--dry-run`.
+Тесты в `tests/` не трогают настоящую `~/.claude/projects`: каждый тест собирает синтетическую историю во временной папке (фикстура `history` в `tests/conftest.py`) и вызывает `claude-code-sync` в том же процессе. Кроме отдельных функций, проверяется полный цикл экспорт → импорт: raw-формат восстанавливается байт в байт, из json собирается корректная цепочка сообщений, субагенты попадают на своё место, работают `--remap`, `--new-ids`, `--overwrite` и `--dry-run`.
 
 ## Где Claude Code хранит переписку
 
@@ -104,33 +115,33 @@ uv run ty check            # проверка типов
     └── ...
 ```
 
-Оба скрипта по умолчанию работают с этой папкой. Другое место задаётся через `--source` для экспорта и `--target` для импорта.
+Обе подкоманды по умолчанию работают с этой папкой. Другое место задаётся через `--source` для экспорта и `--target` для импорта.
 
 ---
 
 ## Экспорт
 
 ```bash
-python3 export_claude_code.py [опции]
+claude-code-sync export [опции]
 ```
 
 ### Примеры
 
 ```bash
 # Всё в Markdown → ./claude_code_export
-python3 export_claude_code.py
+claude-code-sync export
 
 # Markdown для чтения + raw для последующего импорта
-python3 export_claude_code.py --format md raw --sidechain -o ~/claude-backup
+claude-code-sync export --format md raw --sidechain -o ~/claude-backup
 
 # Только один проект и только за последний месяц
-python3 export_claude_code.py --project myapp --since 2026-10-01
+claude-code-sync export --project myapp --since 2026-10-01
 
 # Подробный экспорт: вызовы инструментов, их результаты, размышления
-python3 export_claude_code.py --tools --thinking --max-tool-output 0
+claude-code-sync export --tools --thinking --max-tool-output 0
 
 # Плюс всё одним файлом
-python3 export_claude_code.py --single-file
+claude-code-sync export --single-file
 ```
 
 ### Опции
@@ -173,7 +184,7 @@ claude_code_export/
 
 Файлы называются `дата_название_id`. В шапке каждого Markdown-файла указаны путь к проекту, id сессии, время начала и конца и ветка git.
 
-Что скрипт делает с содержимым:
+Что экспорт делает с содержимым:
 - Убирает `<system-reminder>` и служебные сообщения (если не указан `--raw`).
 - Claude Code записывает ответ ассистента по частям, поэтому части склеиваются в одно сообщение.
 - Повторяющиеся записи пропускаются.
@@ -184,29 +195,29 @@ claude_code_export/
 ## Импорт
 
 ```bash
-python3 import_claude_code.py <папка-экспорта или файл> [опции]
+claude-code-sync import <папка-экспорта или файл> [опции]
 ```
 
 ### Примеры
 
 ```bash
 # Сначала посмотреть, что будет сделано
-python3 import_claude_code.py ~/claude-backup --dry-run
+claude-code-sync import ~/claude-backup --dry-run
 
 # Импортировать
-python3 import_claude_code.py ~/claude-backup
+claude-code-sync import ~/claude-backup
 
 # Перенос с macOS на Linux: проекты лежат по другому пути
-python3 import_claude_code.py ~/claude-backup --remap /Users/me=/home/me
+claude-code-sync import ~/claude-backup --remap /Users/me=/home/me
 
 # Несколько замен путей
-python3 import_claude_code.py ~/claude-backup --remap /Users/me/work=/srv/work --remap /Users/me=/home/me
+claude-code-sync import ~/claude-backup --remap /Users/me/work=/srv/work --remap /Users/me=/home/me
 
 # Импортировать копии рядом с существующими сессиями
-python3 import_claude_code.py ~/claude-backup --new-ids
+claude-code-sync import ~/claude-backup --new-ids
 
 # Один файл
-python3 import_claude_code.py ~/claude-backup/home-user-myapp/2026-11-01_Fix_login_bug_3f2a1b4c.jsonl
+claude-code-sync import ~/claude-backup/home-user-myapp/2026-11-01_Fix_login_bug_3f2a1b4c.jsonl
 ```
 
 ### Опции
@@ -255,19 +266,19 @@ Markdown-экспорт обратно не импортируется, он т�
 
 ```bash
 # Старый компьютер
-python3 export_claude_code.py --format md raw --sidechain -o ~/claude-backup
+claude-code-sync export --format md raw --sidechain -o ~/claude-backup
 # скопировать ~/claude-backup на новый компьютер
 
 # Новый компьютер
-python3 import_claude_code.py ~/claude-backup --remap /старый/путь=/новый/путь --dry-run
-python3 import_claude_code.py ~/claude-backup --remap /старый/путь=/новый/путь
+claude-code-sync import ~/claude-backup --remap /старый/путь=/новый/путь --dry-run
+claude-code-sync import ~/claude-backup --remap /старый/путь=/новый/путь
 ```
 
 `--remap` нужен, только если проекты на новой машине лежат по другому пути: Claude Code находит сессии по пути к папке проекта.
 
 ## Замечания
 
-- Формат файлов Claude Code не документирован официально и может меняться между версиями. Скрипты читают его без жёстких требований: незнакомые типы записей пропускаются.
+- Формат файлов Claude Code не документирован официально и может меняться между версиями. `claude-code-sync` читает его без жёстких требований: незнакомые типы записей пропускаются.
 - В экспорте может оказаться всё, что попало в разговоры, в том числе содержимое файлов, токены и пароли из вывода команд. Храните и передавайте экспорт с осторожностью.
 - Перед импортом с `--overwrite` полезно сделать резервную копию `~/.claude/projects`.
 - Формат `raw` копирует только `.jsonl` сессий и субагентов. Служебные файлы рядом с субагентами (`agent-*.meta.json`, `agent-*.prefix.json`) не переносятся.

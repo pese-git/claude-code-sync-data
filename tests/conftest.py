@@ -10,8 +10,7 @@ from pathlib import Path
 
 import pytest
 
-import export_claude_code
-import import_claude_code
+from claude_code_sync import cli
 
 PROJECT_PATH = "/home/user/my app"
 PROJECT_DIR = "-home-user-my-app"  # так Claude Code кодирует PROJECT_PATH
@@ -154,26 +153,23 @@ def history(tmp_path: Path) -> History:
 Runner = Callable[..., tuple[int, str, str]]
 
 
-def _runner(module, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> Runner:
-    def run(*args: str | Path) -> tuple[int, str, str]:
-        monkeypatch.setattr(sys, "argv", [module.__name__, *map(str, args)])
-        try:
-            code = module.main()
-        except SystemExit as e:  # argparse и Remapper завершают через SystemExit
-            code = e.code if isinstance(e.code, int) else 1
-            if isinstance(e.code, str):
-                print(e.code, file=sys.stderr)
-        out, err = capsys.readouterr()
-        return code, out, err
-
-    return run
+def run_cli(capsys: pytest.CaptureFixture[str], *args: str | Path) -> tuple[int, str, str]:
+    """claude-code-sync <args> в том же процессе → (код возврата, stdout, stderr)."""
+    try:
+        code = cli.main([str(a) for a in args])
+    except SystemExit as e:  # argparse и Remapper завершают через SystemExit
+        code = e.code if isinstance(e.code, int) else 1
+        if isinstance(e.code, str):
+            print(e.code, file=sys.stderr)
+    out, err = capsys.readouterr()
+    return code, out, err
 
 
 @pytest.fixture
-def run_export(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> Runner:
-    return _runner(export_claude_code, monkeypatch, capsys)
+def run_export(capsys: pytest.CaptureFixture[str]) -> Runner:
+    return lambda *args: run_cli(capsys, "export", *args)
 
 
 @pytest.fixture
-def run_import(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> Runner:
-    return _runner(import_claude_code, monkeypatch, capsys)
+def run_import(capsys: pytest.CaptureFixture[str]) -> Runner:
+    return lambda *args: run_cli(capsys, "import", *args)

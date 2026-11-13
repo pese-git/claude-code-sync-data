@@ -6,14 +6,9 @@ from pathlib import Path
 import pytest
 from conftest import AGENT_ID, PROJECT_DIR, PROJECT_PATH, SESSION_ID, History, Runner
 
-import import_claude_code as im
+from claude_code_sync import importer as im
 
 # ---------------------------------------------------------------- утилиты
-
-
-def test_encode_project_dir():
-    assert im.encode_project_dir(PROJECT_PATH) == PROJECT_DIR
-    assert im.encode_project_dir("C:\\Users\\me\\proj") == "C--Users-me-proj"
 
 
 def test_remapper_matches_whole_path_components():

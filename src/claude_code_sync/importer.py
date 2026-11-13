@@ -1,6 +1,5 @@
-#!/usr/bin/env python3
 """
-Импорт переписки в Claude Code (парный скрипт к export_claude_code.py).
+Команда `claude-code-sync import`: загрузка экспорта обратно в Claude Code.
 
 Кладёт сессии в ~/.claude/projects/<закодированный-путь>/<session-id>.jsonl,
 после чего они доступны через `claude --resume` / `claude -c` в соответствующем проекте.
@@ -11,18 +10,16 @@
   Если для сессии есть оба файла, берётся .jsonl.
 
 Примеры:
-    python import_claude_code.py claude_code_export --dry-run
-    python import_claude_code.py claude_code_export
-    python import_claude_code.py export --remap /Users/old=/home/new     # перенос на другую машину
-    python import_claude_code.py export --project myapp --new-ids        # копии под новыми id
+    claude-code-sync import claude_code_export --dry-run
+    claude-code-sync import claude_code_export
+    claude-code-sync import export --remap /Users/old=/home/new     # перенос на другую машину
+    claude-code-sync import export --project myapp --new-ids        # копии под новыми id
 """
 
 from __future__ import annotations
 
 import argparse
-import contextlib
 import json
-import re
 import shutil
 import sys
 import uuid
@@ -33,16 +30,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-DEFAULT_TARGET = Path.home() / ".claude" / "projects"
+from .storage import DEFAULT_PROJECTS_DIR, encode_project_dir, iter_jsonl, write_jsonl
+
 UUID_FIELDS = ("uuid", "parentUuid", "leafUuid", "logicalParentUuid")
 
 
 # ---------------------------------------------------------------- утилиты
-
-
-def encode_project_dir(path: str) -> str:
-    """Так Claude Code называет папку проекта: все символы кроме букв и цифр → '-'."""
-    return re.sub(r"[^A-Za-z0-9]", "-", path)
 
 
 def now_iso() -> str:
@@ -72,27 +65,6 @@ class Remapper:
             if path == old or path.startswith((old + "/", old + "\\")):
                 return new + path[len(old) :]
         return path
-
-
-def read_jsonl(path: Path) -> list[dict]:
-    out = []
-    with path.open(encoding="utf-8", errors="replace") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            with contextlib.suppress(json.JSONDecodeError):
-                out.append(json.loads(line))
-    return out
-
-
-def write_jsonl(path: Path, entries: Iterable[dict]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".jsonl.tmp")
-    with tmp.open("w", encoding="utf-8") as f:
-        for e in entries:
-            f.write(json.dumps(e, ensure_ascii=False, separators=(",", ":")) + "\n")
-    tmp.replace(path)
 
 
 # ---------------------------------------------------------------- модель импортируемой сессии
@@ -131,7 +103,7 @@ def detect_subagent(
 
 
 def load_raw(path: Path, index_by_file: dict[str, dict]) -> ImportItem | None:
-    entries = read_jsonl(path)
+    entries = list(iter_jsonl(path))
     if not entries:
         return None
     sid = first(entries, "sessionId")
@@ -324,18 +296,17 @@ def collect(src: Path) -> list[ImportItem]:
     return items
 
 
-# ---------------------------------------------------------------- main
+# ---------------------------------------------------------------- команда
 
 
-def build_parser() -> argparse.ArgumentParser:
-    ap = argparse.ArgumentParser(description="Импорт переписки в Claude Code")
+def add_arguments(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("source", type=Path, help="папка экспорта (или отдельный .jsonl/.json файл)")
     ap.add_argument(
         "-t",
         "--target",
         type=Path,
-        default=DEFAULT_TARGET,
-        help=f"куда импортировать (по умолчанию {DEFAULT_TARGET})",
+        default=DEFAULT_PROJECTS_DIR,
+        help=f"куда импортировать (по умолчанию {DEFAULT_PROJECTS_DIR})",
     )
     ap.add_argument(
         "--remap",
@@ -357,7 +328,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ap.add_argument("--overwrite", action="store_true", help="перезаписывать существующие сессии")
     ap.add_argument("--dry-run", action="store_true", help="только показать, что будет сделано")
-    return ap
 
 
 def write_item(item: ImportItem, dst: Path, rebuild: bool) -> None:
@@ -368,8 +338,7 @@ def write_item(item: ImportItem, dst: Path, rebuild: bool) -> None:
         write_jsonl(dst, item.entries)
 
 
-def main() -> int:
-    opts = build_parser().parse_args()
+def run(opts: argparse.Namespace) -> int:
 
     src = opts.source.expanduser()
     if not src.exists():
@@ -420,7 +389,3 @@ def main() -> int:
     if stats["ok"] and not opts.dry_run:
         print("Откройте проект и запустите `claude --resume`, чтобы выбрать сессию.")
     return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

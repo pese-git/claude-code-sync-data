@@ -1,15 +1,17 @@
 [project]
 name = "claude-code-sync-data"
 version = "0.1.0"
-description = "Экспорт и импорт переписки Claude Code (Markdown, JSON, raw)"
+description = "Экспорт, импорт и перенос переписки Claude Code (Markdown, JSON, raw)"
 readme = "README.md"
 requires-python = ">=3.9"
 authors = [{ name = "Sergey Penkovsky" }]
 dependencies = []
 
 [project.scripts]
-claude-code-export = "export_claude_code:main"
-claude-code-import = "import_claude_code:main"
+claude-code-sync = "claude_code_sync.cli:main"
+# прежние имена команд, оставлены для совместимости
+claude-code-export = "claude_code_sync.cli:export_main"
+claude-code-import = "claude_code_sync.cli:import_main"
 
 [dependency-groups]
 dev = [
@@ -22,8 +24,8 @@ dev = [
 requires = ["setuptools>=75"]
 build-backend = "setuptools.build_meta"
 
-[tool.setuptools]
-py-modules = ["export_claude_code", "import_claude_code"]
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.ruff]
 target-version = "py39"
