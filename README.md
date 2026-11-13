@@ -25,14 +25,17 @@ uv tool install .
 
 ## Разработка
 
-Проект оформлен через uv, линтер и форматтер — [ruff](https://docs.astral.sh/ruff/), проверка типов — [ty](https://docs.astral.sh/ty/). Настройки лежат в `pyproject.toml`.
+Проект оформлен через uv, линтер и форматтер — [ruff](https://docs.astral.sh/ruff/), проверка типов — [ty](https://docs.astral.sh/ty/), тесты — [pytest](https://docs.pytest.org/). Настройки лежат в `pyproject.toml`.
 
 ```bash
 uv sync                    # окружение и dev-зависимости
+uv run pytest              # тесты
 uv run ruff check          # линтер
 uv run ruff format         # форматирование
 uv run ty check            # проверка типов
 ```
+
+Тесты в `tests/` не трогают настоящую `~/.claude/projects`: каждый тест собирает синтетическую историю во временной папке (фикстура `history` в `tests/conftest.py`) и вызывает `main()` скриптов в том же процессе. Кроме отдельных функций, проверяется полный цикл экспорт → импорт: raw-формат восстанавливается байт в байт, из json собирается корректная цепочка сообщений, субагенты попадают на своё место, работают `--remap`, `--new-ids`, `--overwrite` и `--dry-run`.
 
 ## Где Claude Code хранит переписку
 

@@ -12,7 +12,11 @@ claude-code-export = "export_claude_code:main"
 claude-code-import = "import_claude_code:main"
 
 [dependency-groups]
-dev = ["ruff>=0.17", "ty>=0.0.102"]
+dev = [
+    "pytest>=8.4.2",
+    "ruff>=0.17",
+    "ty>=0.0.102",
+]
 
 [build-system]
 requires = ["setuptools>=75"]
@@ -42,6 +46,10 @@ ignore = ["RUF001", "RUF002", "RUF003"]
 extend-ignore = [
     "E501", # длину строк держит ruff format; длинные строковые литералы не переносим
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["-ra", "--strict-markers"]
 
 [tool.ty.environment]
 python-version = "3.9"
