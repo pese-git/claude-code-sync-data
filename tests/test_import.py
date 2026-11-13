@@ -92,6 +92,10 @@ def test_build_message():
 # ---------------------------------------------------------------- CLI: полный цикл
 
 
+def read_entries(path: Path) -> list[dict]:
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
 def project_files(target: Path) -> dict[str, bytes]:
     return {
         p.relative_to(target).as_posix(): p.read_bytes() for p in sorted(target.rglob("*.jsonl"))
@@ -146,11 +150,7 @@ def test_import_from_json_builds_resumable_chain(
     code, _, _ = run_import(out, "-t", target)
     assert code == 0
 
-    entries = [
-        json.loads(line)
-        for line in (target / PROJECT_DIR / f"{SESSION_ID}.jsonl").read_text().splitlines()
-    ]
-    summary, *messages = entries
+    summary, *messages = read_entries(target / PROJECT_DIR / f"{SESSION_ID}.jsonl")
     assert summary == {
         "type": "summary",
         "summary": "Починка логина",
@@ -165,7 +165,7 @@ def test_import_from_json_builds_resumable_chain(
     assert [b["type"] for b in assistant] == ["text", "tool_use"]
 
     sub = target / PROJECT_DIR / SESSION_ID / "subagents" / f"agent-{AGENT_ID}.jsonl"
-    sub_entries = [json.loads(line) for line in sub.read_text().splitlines()]
+    sub_entries = read_entries(sub)
     assert all(
         e["isSidechain"] and e["agentId"] == AGENT_ID and e["sessionId"] == SESSION_ID
         for e in sub_entries
@@ -200,7 +200,7 @@ def test_remap_moves_project_and_rewrites_cwd(raw_export: Path, run_import: Runn
     target = tmp_path / "target"
     run_import(raw_export, "-t", target, "--remap", "/home/user=/Users/me")
     session = target / "-Users-me-my-app" / f"{SESSION_ID}.jsonl"
-    cwds = {json.loads(line).get("cwd") for line in session.read_text().splitlines()}
+    cwds = {e.get("cwd") for e in read_entries(session)}
     assert cwds == {None, "/Users/me/my app"}  # у summary/system cwd нет
     assert (
         target / "-Users-me-my-app" / SESSION_ID / "subagents" / f"agent-{AGENT_ID}.jsonl"
@@ -220,13 +220,15 @@ def test_new_ids_keep_subagent_with_its_session(
     assert len(subs) == 1
     new_sid = subs[0].parent.parent.name
     assert new_sid in sessions
-    main = [json.loads(line) for line in (proj / f"{new_sid}.jsonl").read_text().splitlines()]
+    main = read_entries(proj / f"{new_sid}.jsonl")
     assert {e["sessionId"] for e in main if "sessionId" in e} == {new_sid}
     assert not {e.get("uuid") for e in main} & {"u1", "a1", "a2"}  # uuid тоже новые
 
 
 def test_project_filter_and_missing_cwd(raw_export: Path, run_import: Runner, tmp_path: Path):
-    (raw_export / "nocwd.jsonl").write_text(json.dumps({"type": "user", "sessionId": "x"}) + "\n")
+    (raw_export / "nocwd.jsonl").write_text(
+        json.dumps({"type": "user", "sessionId": "x"}) + "\n", encoding="utf-8"
+    )
     target = tmp_path / "target"
     _, stdout, err = run_import(raw_export, "-t", target, "--project", "other")
     assert "Импортировано: 1" in stdout and "без пути проекта: 1" in stdout

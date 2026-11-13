@@ -558,7 +558,9 @@ def main() -> int:
                     "started": s.started,
                     "ended": s.ended,
                     "messages": len(s.messages),
-                    "file": str(base.relative_to(out_root)),
+                    "file": base.relative_to(
+                        out_root
+                    ).as_posix(),  # / и на Windows: это ссылка в INDEX.md
                     # исходное место: по нему импорт узнаёт субагентов (<session>/subagents/…)
                     "source_rel": s.file.relative_to(src).as_posix(),
                 }

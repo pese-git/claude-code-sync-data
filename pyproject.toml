@@ -50,6 +50,9 @@ extend-ignore = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = ["-ra", "--strict-markers"]
+# Предупреждения — ошибки. Вместе с PYTHONWARNDEFAULTENCODING=1 (Python 3.10+) это ловит
+# чтение и запись файлов без явной кодировки, которые ломаются на Windows.
+filterwarnings = ["error"]
 
 [tool.ty.environment]
 python-version = "3.9"
