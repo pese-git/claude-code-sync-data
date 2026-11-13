@@ -88,7 +88,7 @@ def fake_stream(encoding: str) -> io.TextIOWrapper:
 def test_configure_output_switches_locale_encoding_to_utf8(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("PYTHONIOENCODING", raising=False)
     raw = io.BytesIO()
-    out = io.TextIOWrapper(raw, encoding="cp1252")
+    out = io.TextIOWrapper(raw, encoding="cp1252", newline="\n")  # без \r\n на Windows
     err, ok = fake_stream("cp1252"), fake_stream("UTF-8")
     monkeypatch.setattr(sys, "stdout", out)
     monkeypatch.setattr(sys, "stderr", err)
